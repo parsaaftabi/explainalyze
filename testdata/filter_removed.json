@@ -1,0 +1,16 @@
+[
+  {
+    "Execution Time": 95.0,
+    "Plan": {
+      "Actual Loops": 1,
+      "Actual Rows": 100,
+      "Actual Startup Time": 1.0,
+      "Actual Total Time": 90.0,
+      "Node Type": "Seq Scan",
+      "Plan Rows": 100,
+      "Relation Name": "events",
+      "Rows Removed by Filter": 50000
+    },
+    "Planning Time": 0.3
+  }
+]

@@ -1,0 +1,51 @@
+[
+  {
+    "Execution Time": 960.0,
+    "Plan": {
+      "Actual Loops": 1,
+      "Actual Rows": 100,
+      "Actual Startup Time": 25.0,
+      "Actual Total Time": 950.0,
+      "Join Type": "Inner",
+      "Node Type": "Hash Join",
+      "Plan Rows": 100,
+      "Plans": [
+        {
+          "Actual Loops": 1,
+          "Actual Rows": 100,
+          "Actual Startup Time": 1.0,
+          "Actual Total Time": 90.0,
+          "Node Type": "Seq Scan",
+          "Plan Rows": 100,
+          "Relation Name": "events",
+          "Rows Removed by Filter": 50000,
+          "Shared Hit Blocks": 900,
+          "Shared Read Blocks": 100
+        },
+        {
+          "Actual Loops": 1,
+          "Actual Rows": 200000,
+          "Actual Startup Time": 20.0,
+          "Actual Total Time": 700.0,
+          "Hash Batches": 8,
+          "Node Type": "Hash",
+          "Original Hash Batches": 1,
+          "Peak Memory Usage": 1024,
+          "Plan Rows": 200000,
+          "Plans": [
+            {
+              "Actual Loops": 1,
+              "Actual Rows": 200000,
+              "Actual Startup Time": 0.5,
+              "Actual Total Time": 60.0,
+              "Node Type": "Seq Scan",
+              "Plan Rows": 200000,
+              "Relation Name": "customers"
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.5
+  }
+]

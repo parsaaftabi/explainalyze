@@ -1,7 +1,8 @@
 // Package explainalyze parses PostgreSQL EXPLAIN (ANALYZE, BUFFERS,
 // FORMAT JSON) output and flags the problems you actually look for:
 // sequential scans over real data, planner misestimates, disk sorts,
-// lossy bitmaps, runaway nested loops, and the nodes eating your time.
+// lossy bitmaps, runaway nested loops, multi-batch hashes, filters that
+// remove far more rows than they return, and the nodes eating your time.
 //
 //	plan, err := explainalyze.Parse(reader)
 //	if err != nil { ... }
@@ -53,6 +54,11 @@ type Node struct {
 	ExactHeapBlocks float64 `json:"Exact Heap Blocks"`
 	LossyHeapBlocks float64 `json:"Lossy Heap Blocks"`
 
+	HashBatches         int     `json:"Hash Batches"`
+	OriginalHashBatches int     `json:"Original Hash Batches"`
+	PeakMemoryUsage     float64 `json:"Peak Memory Usage"`
+	RowsRemovedByFilter float64 `json:"Rows Removed by Filter"`
+
 	Plans []*Node `json:"Plans"`
 }
 
@@ -71,6 +77,9 @@ func Parse(r io.Reader) (*Result, error) {
 		return nil, fmt.Errorf("explainalyze: read: %w", err)
 	}
 	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("explainalyze: empty input: expected EXPLAIN (ANALYZE, FORMAT JSON) output")
+	}
 
 	var arr []struct {
 		Plan          *Node   `json:"Plan"`
@@ -126,24 +135,41 @@ type Options struct {
 	// NestedLoopRows: warn when a nested loop's inner side produces at least
 	// this many total rows (rows x loops).
 	NestedLoopRows float64
+	// HashBatches: warn when a hash node uses more than this many batches.
+	// The default is 1. More than one batch means the hash did not fit in
+	// work_mem in one pass.
+	HashBatches int
+	// FilterRemovedRows: warn when a node removes at least this many rows
+	// with its filter.
+	FilterRemovedRows float64
+	// FilterRemovedRatio: warn when removed rows are at least this many
+	// times the returned rows. Both filter thresholds must be met.
+	FilterRemovedRatio float64
 }
 
 // DefaultOptions are deliberately conservative: they flag clear problems,
 // not noise.
 func DefaultOptions() Options {
 	return Options{
-		SeqScanRows:      10000,
-		MisestimateRatio: 10,
-		SlowNodeMs:       100,
-		SlowNodeFraction: 0.5,
-		BufferBlocks:     10000,
-		NestedLoopRows:   100000,
+		SeqScanRows:        10000,
+		MisestimateRatio:   10,
+		SlowNodeMs:         100,
+		SlowNodeFraction:   0.5,
+		BufferBlocks:       10000,
+		NestedLoopRows:     100000,
+		HashBatches:        1,
+		FilterRemovedRows:  10000,
+		FilterRemovedRatio: 10,
 	}
 }
 
 // Analyze walks the plan and returns findings, ordered by discovery
-// (parents before children).
+// (parents before children). It returns nil for a nil result or a result
+// with no plan.
 func Analyze(res *Result, opts ...func(*Options)) []Finding {
+	if res == nil || res.Plan == nil {
+		return nil
+	}
 	o := DefaultOptions()
 	for _, fn := range opts {
 		fn(&o)
@@ -196,15 +222,14 @@ func (a *analyzer) walk(n *Node) {
 
 	// 2. Planner misestimates.
 	if n.PlanRows >= 1 && n.ActualLoops >= 1 {
-		ratio := n.ActualRows / n.PlanRows
-		inv := n.PlanRows / n.ActualRows
-		if n.ActualRows > 0 && (ratio >= a.opts.MisestimateRatio || inv >= a.opts.MisestimateRatio) {
+		factor, bad := misestimateFactor(n.PlanRows, n.ActualRows, a.opts.MisestimateRatio)
+		if bad {
 			a.add(Finding{
 				Severity: Warning,
 				NodeType: n.NodeType,
 				Relation: rel,
 				Message: fmt.Sprintf("planner misestimated %s by %.1fx (planned %s rows, got %s)",
-					quote(label(n, rel)), max(ratio, inv), commas(int64(n.PlanRows)), commas(int64(n.ActualRows))),
+					quote(label(n, rel)), factor, commas(int64(n.PlanRows)), commas(int64(n.ActualRows))),
 				Detail: "Bad estimates pick bad plans. Run ANALYZE on the table; for skewed columns consider extended statistics (CREATE STATISTICS).",
 			})
 		}
@@ -247,7 +272,47 @@ func (a *analyzer) walk(n *Node) {
 		}
 	}
 
-	// 6. The node eating your time.
+	// 6. Hash builds that did not fit in one batch.
+	if (n.NodeType == "Hash" || n.NodeType == "Hash Join") && n.HashBatches > a.opts.HashBatches {
+		grew := n.OriginalHashBatches > 0 && n.HashBatches > n.OriginalHashBatches
+		hasPeak := n.PeakMemoryUsage > 0
+		noOriginal := n.OriginalHashBatches == 0
+		if grew || hasPeak || noOriginal {
+			msg := fmt.Sprintf("hash used %s batches", commas(int64(n.HashBatches)))
+			if n.OriginalHashBatches > 0 {
+				msg = fmt.Sprintf("hash used %s batches (planned %s)", commas(int64(n.HashBatches)), commas(int64(n.OriginalHashBatches)))
+			}
+			if n.PeakMemoryUsage > 0 {
+				msg += fmt.Sprintf(", peak memory %s KB", commas(int64(n.PeakMemoryUsage)))
+			}
+			a.add(Finding{
+				Severity: Warning,
+				NodeType: n.NodeType,
+				Relation: rel,
+				Message:  msg,
+				Detail:   "A hash that needs more than one batch spills to disk. Raise work_mem, cut the row count before the join, or check the join key estimate.",
+			})
+		}
+	}
+
+	// 7. Filters removing far more rows than they return.
+	if n.RowsRemovedByFilter >= a.opts.FilterRemovedRows {
+		removed := n.RowsRemovedByFilter
+		returned := n.ActualRows
+		overRatio := returned <= 0 || removed >= a.opts.FilterRemovedRatio*returned
+		if overRatio {
+			a.add(Finding{
+				Severity: Warning,
+				NodeType: n.NodeType,
+				Relation: rel,
+				Message: fmt.Sprintf("%s removed %s rows by filter and returned %s rows",
+					label(n, rel), commas(int64(removed)), commas(int64(returned))),
+				Detail: "The filter is doing work an index should do. Add an index on the filtered columns or rewrite the predicate so an existing index can use it.",
+			})
+		}
+	}
+
+	// 8. The node eating your time.
 	if excl := exclusiveMs(n); excl >= a.opts.SlowNodeMs && a.totalMs > 0 && excl/a.totalMs >= a.opts.SlowNodeFraction {
 		a.add(Finding{
 			Severity: Note,
@@ -263,22 +328,53 @@ func (a *analyzer) walk(n *Node) {
 	}
 }
 
-// exclusiveMs estimates the node's own time: its total minus its children,
-// scaled by loop count. Times in EXPLAIN are per-loop averages.
-func exclusiveMs(n *Node) float64 {
-	child := 0.0
-	for _, c := range n.Plans {
-		child += c.ActualTotalTime
+// misestimateFactor returns how far off the estimate was and whether it
+// crosses the threshold. It handles zero actual rows without dividing by
+// zero. Planned 10,000 rows and 0 actual rows is a miss. Planned 5 rows
+// and 0 actual rows is not.
+func misestimateFactor(planRows, actualRows, threshold float64) (float64, bool) {
+	if planRows < 1 {
+		return 0, false
 	}
-	excl := n.ActualTotalTime - child
+	if actualRows == 0 {
+		return planRows, planRows >= threshold
+	}
+	ratio := actualRows / planRows
+	inv := planRows / actualRows
+	factor := max(ratio, inv)
+	return factor, factor >= threshold
+}
+
+// exclusiveMs estimates the node's own time. Times in EXPLAIN are per-loop
+// averages, so each node total is its per-loop time times its own loops.
+// Parent and child totals must use the same basis before subtraction.
+// Subtracting a child per-loop time from a parent per-loop time and then
+// scaling by the parent loops gives the wrong answer when the child ran
+// many more loops than the parent.
+func exclusiveMs(n *Node) float64 {
+	if n == nil {
+		return 0
+	}
+	childTotal := 0.0
+	for _, c := range n.Plans {
+		childTotal += nodeTotalMs(c)
+	}
+	excl := nodeTotalMs(n) - childTotal
 	if excl < 0 {
 		excl = 0
+	}
+	return excl
+}
+
+func nodeTotalMs(n *Node) float64 {
+	if n == nil {
+		return 0
 	}
 	loops := n.ActualLoops
 	if loops < 1 {
 		loops = 1
 	}
-	return excl * loops
+	return n.ActualTotalTime * loops
 }
 
 // label prefers "Index Scan on orders using idx", falling back sanely.

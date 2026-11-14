@@ -1,0 +1,16 @@
+[
+  {
+    "Execution Time": 6.0,
+    "Plan": {
+      "Actual Loops": 1,
+      "Actual Rows": 0,
+      "Actual Startup Time": 0.1,
+      "Actual Total Time": 5.0,
+      "Index Name": "users_email_idx",
+      "Node Type": "Index Scan",
+      "Plan Rows": 10000,
+      "Relation Name": "users"
+    },
+    "Planning Time": 0.2
+  }
+]

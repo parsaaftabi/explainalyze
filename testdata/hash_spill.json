@@ -1,0 +1,48 @@
+[
+  {
+    "Execution Time": 810.0,
+    "Plan": {
+      "Actual Loops": 1,
+      "Actual Rows": 5000,
+      "Actual Startup Time": 20.0,
+      "Actual Total Time": 800.0,
+      "Join Type": "Inner",
+      "Node Type": "Hash Join",
+      "Plan Rows": 5000,
+      "Plans": [
+        {
+          "Actual Loops": 1,
+          "Actual Rows": 5000,
+          "Actual Startup Time": 0.5,
+          "Actual Total Time": 30.0,
+          "Node Type": "Seq Scan",
+          "Plan Rows": 5000,
+          "Relation Name": "orders"
+        },
+        {
+          "Actual Loops": 1,
+          "Actual Rows": 200000,
+          "Actual Startup Time": 15.0,
+          "Actual Total Time": 700.0,
+          "Hash Batches": 8,
+          "Node Type": "Hash",
+          "Original Hash Batches": 1,
+          "Peak Memory Usage": 1024,
+          "Plan Rows": 200000,
+          "Plans": [
+            {
+              "Actual Loops": 1,
+              "Actual Rows": 200000,
+              "Actual Startup Time": 0.5,
+              "Actual Total Time": 60.0,
+              "Node Type": "Seq Scan",
+              "Plan Rows": 200000,
+              "Relation Name": "customers"
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.5
+  }
+]
